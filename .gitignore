@@ -1,0 +1,6 @@
+/.lake/
+/build/
+/lake-manifest.json
+/artifacts/kernel/build/
+/artifacts/kernel/cache/
+/artifacts/kernel/src/

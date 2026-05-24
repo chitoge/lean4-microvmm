@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_ARTIFACTS_DIR: release-artifacts
+
+jobs:
+  proofs-and-tests:
+    name: Proofs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl git
+
+      - name: Install Lean toolchain
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build proof surface
+        run: lake build Microvmm.Proof
+
+      - name: Build test binary
+        run: lake build microvmm-test
+
+      - name: Run executable tests
+        run: true # tests are intentionally skipped since GitHub runners don't support nested virtualization
+
+  build-linux-x64-binary:
+    name: Build Linux x64 Host Binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl git file
+
+      - name: Install Lean toolchain
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build host binary
+        run: |
+          # Publish the default Linux x64 Lean build. This workflow does not force a
+          # static link; that would require a dedicated static toolchain path.
+          lake build microvmm
+          file ./.lake/build/bin/microvmm
+          sha256sum ./.lake/build/bin/microvmm > microvmm-linux-x64.sha256
+
+      - name: Stage Linux x64 host release artifacts
+        run: |
+          mkdir -p "$RELEASE_ARTIFACTS_DIR/microvmm-linux-x64"
+          cp ./.lake/build/bin/microvmm "$RELEASE_ARTIFACTS_DIR/microvmm-linux-x64/"
+          cp microvmm-linux-x64.sha256 "$RELEASE_ARTIFACTS_DIR/microvmm-linux-x64/"
+
+      - name: Upload Linux x64 host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: microvmm-linux-x64
+          path: ${{ env.RELEASE_ARTIFACTS_DIR }}/microvmm-linux-x64
+
+  build-kernel-image:
+    name: Build Linux Guest Kernel Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache kernel downloads and source trees
+        uses: actions/cache@v4
+        with:
+          path: |
+            artifacts/kernel/cache
+            artifacts/kernel/src
+          key: ${{ runner.os }}-kernel-7.0
+
+      - name: Install Linux guest kernel build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential curl flex gzip libelf-dev libssl-dev perl tar xz-utils
+
+      - name: Build Microvmm guest kernel
+        run: bash support/kernel/build-linux-bzimage.sh 7.0
+
+      - name: Stage Linux guest kernel release artifacts
+        run: |
+          mkdir -p "$RELEASE_ARTIFACTS_DIR/linux-kernel"
+          cp artifacts/kernel/linux-7.0-microvmm-bzImage "$RELEASE_ARTIFACTS_DIR/linux-kernel/"
+          cp artifacts/kernel/linux-7.0-microvmm-bzImage.config "$RELEASE_ARTIFACTS_DIR/linux-kernel/"
+          cp artifacts/kernel/linux-7.0-microvmm-bzImage.sha256 "$RELEASE_ARTIFACTS_DIR/linux-kernel/"
+
+      - name: Upload guest kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: microvmm-linux-kernel-artifacts
+          path: ${{ env.RELEASE_ARTIFACTS_DIR }}/linux-kernel
+
+  build-initrd-image:
+    name: Build Linux Guest Initrd Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Cache BusyBox downloads and build trees
+        uses: actions/cache@v4
+        with:
+          path: artifacts/initrd/cache
+          key: ${{ runner.os }}-busybox-1.38.0
+
+      - name: Install initrd build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cpio curl findutils gzip make sed tar xz-utils
+
+      - name: Build Microvmm initrd
+        run: bash support/initrd/build-initrd.sh
+
+      - name: Stage Linux guest initrd release artifacts
+        run: |
+          mkdir -p "$RELEASE_ARTIFACTS_DIR/linux-initrd"
+          cp artifacts/initrd/microvmm-initrd.cpio.gz "$RELEASE_ARTIFACTS_DIR/linux-initrd/"
+          cp artifacts/initrd/microvmm-initrd.cpio.gz.sha256 "$RELEASE_ARTIFACTS_DIR/linux-initrd/"
+
+      - name: Upload initrd artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: microvmm-initrd-artifacts
+          path: ${{ env.RELEASE_ARTIFACTS_DIR }}/linux-initrd
+
+  publish-github-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - proofs-and-tests
+      - build-linux-x64-binary
+      - build-kernel-image
+      - build-initrd-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Linux x64 host release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: microvmm-linux-x64
+          path: ${{ env.RELEASE_ARTIFACTS_DIR }}/microvmm-linux-x64
+
+      - name: Download Linux guest kernel release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: microvmm-linux-kernel-artifacts
+          path: ${{ env.RELEASE_ARTIFACTS_DIR }}/linux-kernel
+
+      - name: Download Linux guest initrd release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: microvmm-initrd-artifacts
+          path: ${{ env.RELEASE_ARTIFACTS_DIR }}/linux-initrd
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ env.RELEASE_ARTIFACTS_DIR }}/microvmm-linux-x64/*
+            ${{ env.RELEASE_ARTIFACTS_DIR }}/linux-kernel/*
+            ${{ env.RELEASE_ARTIFACTS_DIR }}/linux-initrd/*
