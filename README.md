@@ -31,6 +31,8 @@ Build the project and the guest artifacts:
 ```sh
 lake build
 lake build Microvmm.Proof # for checking the proofs only
+# the following commands build the Linux kernel and initrd
+# alternatively, you can download these artifacts from a release
 bash support/kernel/build-linux-bzimage.sh 7.0
 bash support/initrd/build-initrd.sh
 ```
@@ -47,6 +49,10 @@ lake env ./.lake/build/bin/microvmm linux \
 
 When boot succeeds, the initrd emits `MICROVMM_INITRD_READY` and the guest is ready for interactive input.
 
+## Demo
+
+Here is a demo of the quick start using pre-built Linux kernel and initrd from the [v0.0.1 release](https://github.com/chitoge/lean4-microvmm/releases/tag/v0.0.1): https://asciinema.org/a/smLesn6bTEnLUVsd
+
 ## Read next
 
 - [Proof engineer guide](docs/proof-engineer-guide.md): current claims, assumptions, and where to start in `Microvmm/Proof.lean`
@@ -55,6 +61,7 @@ When boot succeeds, the initrd emits `MICROVMM_INITRD_READY` and the guest is re
 - [Proof roadmap](docs/proof-roadmap.md): module-by-module proof surface
 - [Architecture](docs/architecture.md): subsystem layout and trusted boundary
 - [Module map](docs/module-map.md): where implementation and proof modules live
+- [Blueprint](https://chitoge.github.io/lean4-microvmm/blueprint/): published proof-planning and theorem-dependency view for the current formalization
 
 ## Scope
 

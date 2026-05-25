@@ -1,0 +1,129 @@
+\chapter{Overview}
+
+Microvmm is a Lean 4 micro-VMM for x86\_64 Linux/KVM with a deliberately narrow trusted C boundary.
+The implementation focus today is one Linux guest, one virtio-rng device, and a proof surface that tracks the live Lean execution path as closely as possible.
+
+\chapter{Current Proof Surface}
+
+This blueprint follows the proof engineer guide's reading order.
+The flagship current claim is the CVE-facing post-activation queue-latching theorem family.
+The remaining theorem nodes below are proved, but they are still narrow supporting slices for the current accepted virtio-rng shape rather than a complete general virtio safety story.
+
+\begin{theorem}[Flagship: post-activation queue rewrites keep the execution queue latched]
+\label{thm:cve-latched-queue}
+\lean{Microvmm.virtioQueueConfigurationLatchedAfterActivation_queueNum, Microvmm.virtioQueueConfigurationLatchedAfterActivation_queueReady, Microvmm.virtioQueueConfigurationLatchedAfterActivation_queueAddress}
+\leanok
+For the current virtio-rng device, once activation succeeds, later successful rewrites of queue size, queue ready, and queue address registers cannot break `activeQueue = latchedQueue`.
+This is the current CVE-2026-5747-facing flagship claim.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:queue-immutability}
+These are the public CVE corollaries exported from `Microvmm/Proof.lean`: once the queue is active and latched, successful post-activation rewrite attempts preserve that latched execution queue instead of silently retargeting later DMA.
+\end{proof}
+
+\begin{theorem}[Supporting fact: post-activation queue rewrites preserve the live queue]
+\label{thm:queue-immutability}
+\lean{Microvmm.virtioQueueConfigurationImmutableAfterActivation_queueNum, Microvmm.virtioQueueConfigurationImmutableAfterActivation_queueReady, Microvmm.virtioQueueConfigurationImmutableAfterActivation_queueAddress}
+\leanok
+After activation, the live queue used for execution is unchanged by successful writes to queue size, queue ready, and queue address registers.
+\end{theorem}
+
+\begin{proof}
+\leanok
+This is the stronger preserved-live-queue story that the CVE-facing latched corollaries build on: if the write cannot change the live queue, the already-latched execution queue stays the queue that later execution sees.
+\end{proof}
+
+\begin{theorem}[Current structural safety is only for the accepted virtio-rng request shape]
+\label{thm:queue-structure}
+\lean{Microvmm.virtioQueueStructuralSafety_forAcceptedRngRequest}
+\leanok
+The current structural-safety theorem is intentionally narrow: queue size is fixed to `1`, the accepted descriptor is writable, `NEXT` and `INDIRECT` are rejected, and the observed chain length is exactly one.
+\end{theorem}
+
+\begin{proof}
+\leanok
+This matches the proof engineer guide exactly: the repo does not yet claim a general reachable-descriptor-chain theorem, only the accepted virtio-rng request shape that the current Linux path uses.
+\end{proof}
+
+\begin{theorem}[Descriptor-validity invariants survive the current accepted path]
+\label{thm:descriptor-validity}
+\lean{Microvmm.virtioAcceptedRngRequestSatisfiesDescriptorValidityInvariants, Microvmm.virtioPreservedQueueTransitionPreservesDescriptorValidity, Microvmm.linuxPlatformProcessQueuePreservesDescriptorValidity, Microvmm.linuxInteractiveProcessQueueStepPreservesDescriptorValidity}
+\leanok
+For that same accepted shape, the current proof surface packages descriptor validity at acceptance time and shows that the current preserved-queue and Linux-facing `processQueue` steps carry the same judgment forward.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:queue-structure}
+This is a real current safety slice, but it is still scoped to the accepted virtio-rng shape rather than arbitrary queue sizes or arbitrary descriptor chains.
+\end{proof}
+
+\begin{theorem}[The executor and public completion path realize the planned write length]
+\label{thm:executor-trace}
+\lean{Microvmm.virtioRngAcceptedRequestWritesExactlyRequestedBufferLength, Microvmm.virtioRngExecutorReportsPureCompletionTrace, Microvmm.virtioRngPublicCompletionRefinesPureCompletionTrace}
+\leanok
+For the current accepted virtio-rng request shape, the pure planner fixes the completion length, and the real executor plus public completion entry point realize exactly that plan-derived trace.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:queue-structure}
+This is the bridge from the narrow accepted-shape planner theorem to the real execution path: the current proofs do not yet claim whole-loop liveness, but they do recover the exact completion trace of the successful branch.
+\end{proof}
+
+\begin{theorem}[Accepted virtio-rng accesses stay within validated guest regions]
+\label{thm:validated-accesses}
+\lean{Microvmm.virtioRngAcceptedRequestAccessesStayWithinValidatedRegions}
+\leanok
+For the current accepted virtio-rng request shape, every executor read and completion write stays within guest-memory regions that were validated before execution.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:queue-structure, thm:executor-trace}
+This is a proved narrow safety theorem, but it is no longer the headline claim: the guide's emphasis is that it holds only for the current accepted virtio-rng shape and successful completion path.
+\end{proof}
+
+\begin{theorem}[The documented Linux virtio path reaches the named raw boundary]
+\label{thm:shim-boundary}
+\lean{Microvmm.linuxPlatformProcessQueueRefines, Microvmm.linuxInteractiveProcessQueueStepRefinesUpToRawBoundary, Microvmm.linuxVirtioRawBoundary_holds}
+\leanok
+On the documented interactive Linux/initrd path, the successful virtio-rng `processQueue` branch refines to the named raw boundary above shim-backed MMIO observation, guest-memory wrappers, and IRQ requests.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:executor-trace}
+This remains a successful-branch refinement theorem, not a liveness result, and it still does not verify `ffi/shim.c` itself. It makes the remaining trusted boundary explicit instead of hiding it.
+\end{proof}
+
+\chapter{Safety Proofs Still in Progress}
+
+The broader safety story is still work in progress beyond the flagship CVE theorem family above.
+The current proof surface is intentionally narrow and the guide is explicit about the rows that are not yet claimed.
+
+\section{Beyond The Accepted Virtio-rng Shape}
+
+The current structural and descriptor-validity theorems are only for the accepted virtio-rng request shape: queue size `1`, one writable descriptor, no `NEXT`, no `INDIRECT`, and `descNext = 0`.
+General theorems over arbitrary reachable descriptor chains are still work in progress.
+
+\section{Descriptor Ownership And Linear Capabilities}
+
+The repo does not yet model descriptor ownership as a linear capability discipline, so there is no current top-level theorem that guest and device can never own the same descriptor simultaneously.
+
+\section{Lifecycle And Liveness}
+
+The implementation enforces a narrow status and activation discipline, but there is not yet a proved lifecycle-graph theorem over all reachable queue and device states.
+Likewise, the Linux-facing runtime theorems are successful-branch refinements up to the named raw boundary, not a proof that every valid request eventually completes under the real run loops.
+
+\section{Boundary Transparency}
+
+The named raw boundary remains part of the current story on purpose.
+`ffi/shim.c` and the raw extern boundary are still trusted, so the current proofs stop above the C shim rather than claiming that the shim itself is verified.
+
+\chapter{Next Steps}
+
+The next proof lifts are aimed at broadening the safety story beyond the current accepted virtio-rng shape while also narrowing the trusted boundary further around host-side effects and bounded run-loop orchestration.
+This blueprint will expand alongside the proof surface exported by the project.

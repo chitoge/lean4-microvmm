@@ -2,10 +2,12 @@ import Lake
 open Lake DSL
 
 package "Microvmm" where
-  version := v!"0.1.0"
+  version := v!"0.0.1"
   moreLinkObjs := #[`@/microvmm_shim, `@/microvmm_virtio_rng_probe_guest]
 
 lean_lib "Microvmm"
+
+lean_lib "MicrovmmProof"
 
 @[default_target]
 lean_exe "microvmm" where
@@ -24,3 +26,5 @@ target microvmm_virtio_rng_probe_guest (pkg : NPackage __name__) : System.FilePa
   let srcJob <- inputTextFile <| pkg.dir / "ffi" / "virtio_rng_probe_guest.S"
   let oFile := pkg.buildDir / "ffi" / "virtio_rng_probe_guest.o"
   buildO oFile srcJob #[]
+
+ require checkdecls from git "https://github.com/PatrickMassot/checkdecls.git"

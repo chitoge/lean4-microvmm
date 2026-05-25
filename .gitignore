@@ -4,3 +4,6 @@
 /artifacts/kernel/build/
 /artifacts/kernel/cache/
 /artifacts/kernel/src/
+/blueprint/web/
+/blueprint/print/
+/blueprint/lean_decls

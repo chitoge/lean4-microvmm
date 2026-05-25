@@ -31,6 +31,12 @@ directly at the top-level theorem names exported by `Microvmm/Proof.lean`.
 | For virtio-rng, the device writes exactly the requested buffer length | Yes | `virtioRngAcceptedRequestWritesExactlyRequestedBufferLength`, `virtioRngExecutorReportsPureCompletionTrace`, `virtioRngPublicCompletionRefinesPureCompletionTrace` | In the current accepted virtio-rng request shape, the pure planner proves `completedLen = descLen` and `payload.length = descLen`, and the executor proof ties the real write trace back to that plan. The remaining narrowness is in queue shape, not in the completed byte count. |
 | All device memory accesses remain within validated guest regions | Yes | `virtioRngAcceptedRequestAccessesStayWithinValidatedRegions` | For the current accepted virtio-rng request shape, the proof packages one theorem for executor reads and one theorem for completion writes, each phrased as “already-validated base region” plus “concrete offsets touched by the real path fit inside that region.” Narrowness: this is still only the current accepted virtio-rng shape and the successful completion path up to the named raw boundary, not a general theorem over arbitrary virtio devices or arbitrary failing traces. |
 
+## immutable vs latched
+
+- `immutable` theorems conclude `preservesLiveQueue`, which is the stronger fact that both `activeQueue` and `latchedQueue` stayed unchanged.
+- `latched` theorems conclude `queueConfigLatched next`, which is the CVE-facing corollary that `activeQueue = latchedQueue` still holds after the rewrite attempt.
+- The bridge is `preservesLiveQueue_keeps_queueConfigLatched`: if the queue was latched before and the write preserved both queues, it stays latched after.
+
 ## Assumptions and trusted boundary
 
 - `ffi/shim.c` and the extern declarations in `Microvmm/FFI.lean` remain trusted. They perform raw ioctls, guest-memory reads and writes, and host IO.
