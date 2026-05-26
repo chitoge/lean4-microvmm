@@ -55,6 +55,17 @@ jobs:
           lake build MicrovmmProof
           lake build Microvmm.Proof
 
+      - name: Resolve Lean API doc dependencies
+        run: |
+          cd docbuild
+          lake update doc-gen4
+          lake update Microvmm
+
+      - name: Build Lean API docs
+        run: |
+          cd docbuild
+          lake build Microvmm:docs MicrovmmProof:docs
+
       - name: Install leanblueprint
         run: |
           python -m pip install --upgrade pip
@@ -68,8 +79,9 @@ jobs:
 
       - name: Stage GitHub Pages site
         run: |
-          mkdir -p _site/blueprint
+          mkdir -p _site/blueprint _site/docs
           cp -R blueprint/web/. _site/blueprint/
+          cp -R docbuild/.lake/build/doc/. _site/docs/
           cat > _site/index.html <<'EOF'
           <!doctype html>
           <html lang="en">

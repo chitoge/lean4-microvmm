@@ -6,21 +6,52 @@ The implementation focus today is one Linux guest, one virtio-rng device, and a 
 \chapter{Current Proof Surface}
 
 This blueprint follows the proof engineer guide's reading order.
-The flagship current claim is the CVE-facing post-activation queue-latching theorem family.
-The remaining theorem nodes below are proved, but they are still narrow supporting slices for the current accepted virtio-rng shape rather than a complete general virtio safety story.
+The public proof surface is intentionally narrow: one virtio-rng device, one accepted request shape, one documented Linux/initrd runtime path, and an explicit stop at the raw shim boundary.
 
-\begin{theorem}[Flagship: post-activation queue rewrites keep the execution queue latched]
+Four terms recur throughout this chapter. Latching means `queueConfigLatched`, exactly the equality `device.activeQueue = device.latchedQueue`. A live queue is the queue the device would actually execute from in the current state. Refinement is used in three nearby senses: trace refinement means effectful execution realizes the same guest-write trace as the pure planner, report recovery/refinement means a wrapper or shell recovers the same completion report one layer higher, and refinement up to the raw boundary means the runtime theorems carry that same report to a named boundary predicate and then stop. The raw boundary is that stopping point: Lean proves the wrapper layer reduces to predicates such as `LinuxVirtioRawBoundary`, while the behavior of the raw extern/C shim beneath those predicates remains trusted.
+
+Many repository theorems whose names end in `_refines` or `_upToRawBoundary` are therefore concrete recovery statements, not an unnamed simulation relation. For example, `linuxPlatformProcessQueueRefines` concludes a conjunction saying `nextState.console = state.console`, that there exist `nextDevice` and `report` with `nextState.bus.virtioPci = { afterWrite with device := nextDevice }`, that `completeDeterministicEntropyRequestWithReport ...` runs to `(nextDevice, report)`, that `report.writes = virtioEntropyCompletionWrites report.plan`, and that the wrapper layer realizes exactly those writes. The serial and interactive `_upToRawBoundary` theorems keep that same recovered-report shape and then add shell-level `IOResultRunsTo ...` conclusions together with the named boundary fact `LinuxVirtioRawBoundary ...`. So in this blueprint, a refinement theorem is read literally as a conjunction-shaped report-recovery statement for one successful branch, sometimes packaged one shell farther up to the raw boundary, and not as a broader claim about all runtime behavior.
+
+\section{How The Current Proof Chain Fits Together}
+
+The flagship public claim is the CVE-facing post-activation latching-preservation theorem family, but that theorem only makes sense as the end of a longer chain.
+The execution-side root exposed by the current public surface is \Cref{thm:queue-activation}: successful activation creates the accepted queue shape used by the current virtio-rng model.
+Alongside that activation-rooted path, the current public story also has a separate CVE/latching track that additionally assumes `hLatched : queueConfigLatched device`; the current public proof surface does not yet export a theorem that carries the activation-side equality from the successful `QueueReady := 1` branch into that CVE chain.
+At the implementation level, the successful `writeQueueReady` branch in `Microvmm/Device/Virtio/Core.lean` sets both `activeQueue := some activeQueue` and `latchedQueue := some activeQueue`.
+But the currently surfaced reusable activation theorem is narrower: `writeQueueReady_one_establishes_queueShapeValid` exposes only that there exists a queue with `next.activeQueue = some queue` and `queueShapeValid queue`.
+Since that theorem does not also export `next.latchedQueue = some queue` or `queueConfigLatched next`, the gap is currently in the proof surface rather than in the implementation branch: the bridge from activation to latching is still missing from the reusable/public theorem surface and remains a small refactoring/export task.
+Taken together, the current public story has two short tracks:
+
+\begin{itemize}
+\item \textbf{CVE/latching track.} Given `hLatched : queueConfigLatched device`, \Cref{thm:queue-immutability} shows that successful post-activation queue-register rewrites preserve the live queue. \Cref{thm:latching-bridge} then says that if the starting state is already latched, preserving the live queue preserves `queueConfigLatched`. \Cref{thm:cve-latched-queue} packages that preservation into the field-specific CVE-facing public claim.
+\item \textbf{Structural/execution track.} Starting from \Cref{thm:queue-activation} and \Cref{thm:queue-structure}, the proof fixes the accepted request geometry. \Cref{thm:descriptor-validity} then bundles the acceptance-time descriptor-validity package together with parallel preserved-queue transports for the decoded PCI write layer, the Linux platform handler, and the serial and interactive Linux runtime `processQueue` shells. \Cref{thm:executor-trace} connects the pure planner to realized completion writes, and \Cref{thm:validated-accesses} packages the corresponding planner-side validated-region facts. \Cref{thm:shim-boundary} then lifts that same recovered report through the documented Linux runtime path up to the named raw boundary.
+\end{itemize}
+
+So the missing public bridge is not a vague activation-to-safety gap or a claim that the implementation fails to latch at activation: it is specifically the absence of a public theorem carrying that activation-side equality into the exported CVE chain.
+Each theorem below explains one link in that chain and states the current narrowness explicitly.
+
+\section{Flagship CVE Defense}
+
+The motivating bug class is the post-activation queue-mutation path made famous by Firecracker CVE-2026-5747: a guest tries to rewrite queue configuration after activation so that later device execution uses a different queue from the one that was originally validated.
+Microvmm's current flagship defense is to make the execution queue effectively immutable after activation and then prove the CVE-facing corollary that any already-latched queue remains the queue execution sees after later successful rewrites.
+As explained in the overview above, the remaining narrowness is only a proof-surface/export gap: the public chain still lacks the reusable theorem that carries the successful `QueueReady := 1` activation-side latching equality into the exported CVE corollaries.
+
+\begin{theorem}[Flagship: post-activation queue rewrites preserve an already-latched execution queue]
 \label{thm:cve-latched-queue}
 \lean{Microvmm.virtioQueueConfigurationLatchedAfterActivation_queueNum, Microvmm.virtioQueueConfigurationLatchedAfterActivation_queueReady, Microvmm.virtioQueueConfigurationLatchedAfterActivation_queueAddress}
 \leanok
-For the current virtio-rng device, once activation succeeds, later successful rewrites of queue size, queue ready, and queue address registers cannot break `activeQueue = latchedQueue`.
-This is the current CVE-2026-5747-facing flagship claim.
+For the current virtio-rng device, if `hLatched : queueConfigLatched device` holds before a successful post-activation rewrite of queue size, queue ready, or queue address, then the resulting device is still `queueConfigLatched`.
+No exported theorem in the current public proof surface yet instantiates that premise from successful activation alone.
 \end{theorem}
 
 \begin{proof}
 \leanok
-\uses{thm:queue-immutability}
-These are the public CVE corollaries exported from `Microvmm/Proof.lean`: once the queue is active and latched, successful post-activation rewrite attempts preserve that latched execution queue instead of silently retargeting later DMA.
+\uses{thm:queue-immutability, thm:spec-predicates, thm:core-cve-internals}
+The proof has three named steps and is explicitly conditional on a starting latched state.
+First, the field-specific core theorems collected in \Cref{thm:core-write-preservation}, namely `writeQueueNum_preservesLiveQueue_whenActive`, `writeQueueReady_preservesLiveQueue_whenActive`, and `writeQueueAddr_preservesLiveQueue_whenActive`, show that each successful post-activation rewrite preserves `preservesLiveQueue`.
+Second, the bridge theorem in \Cref{thm:latching-bridge}, namely `preservesLiveQueue_keeps_queueConfigLatched`, takes that preserved-live-queue fact together with the explicit premise `hLatched : queueConfigLatched device` and concludes that the ending state is still `queueConfigLatched`.
+Third, the corollaries collected in \Cref{thm:cve-corollaries}, namely `cve_2026_5747_queueNum_postActivation_safe`, `cve_2026_5747_queueReady_postActivation_safe`, and `cve_2026_5747_queueAddr_postActivation_safe`, package that composition into the three field-specific statements re-exported by `Microvmm/Proof.lean`.
+So \Cref{thm:cve-latched-queue} is a preservation theorem for already-latched devices, not an unconditional claim that activation by itself establishes latching.
 \end{proof}
 
 \begin{theorem}[Supporting fact: post-activation queue rewrites preserve the live queue]
@@ -32,7 +63,33 @@ After activation, the live queue used for execution is unchanged by successful w
 
 \begin{proof}
 \leanok
-This is the stronger preserved-live-queue story that the CVE-facing latched corollaries build on: if the write cannot change the live queue, the already-latched execution queue stays the queue that later execution sees.
+\uses{thm:spec-predicates, thm:core-cve-internals}
+The proof is just the grouped statement of the three field-specific core theorems collected in \Cref{thm:core-write-preservation}: `writeQueueNum_preservesLiveQueue_whenActive`, `writeQueueReady_preservesLiveQueue_whenActive`, and `writeQueueAddr_preservesLiveQueue_whenActive`.
+Mechanistically, once a queue is active these write paths only record ignored post-activation mutations in attempted/shadow or diagnostic state; they do not rewrite the live queue that execution reads.
+Each theorem handles one decoded queue-register family and concludes the same predicate `preservesLiveQueue`.
+The public theorem in `Microvmm/Proof.lean` collects those three cases into one claim about post-activation queue rewrites as a class.
+\end{proof}
+
+\section{Accepted Shape And Descriptor Validity}
+
+The queue-immutability story explains why the active queue does not silently move.
+The next question is what shape that queue has and what facts about the accepted descriptor request are carried into execution.
+The current answer is deliberately narrow: the proof chain only covers the repository's current accepted virtio-rng shape.
+
+\begin{theorem}[Activation establishes the accepted queue shape]
+\label{thm:queue-activation}
+\lean{Microvmm.virtioQueueActivationEstablishesAcceptedShape}
+\leanok
+When `QueueReady := 1` succeeds from an inactive device, the newly active queue satisfies the accepted queue-shape predicate used by the current virtio-rng model.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates, thm:rng-proof-kernel}
+The public theorem is a thin wrapper around the lower activation theorem in \Cref{thm:activation-kernel}, namely `writeQueueReady_one_establishes_queueShapeValid`.
+That lower theorem analyzes the successful `QueueReady := 1` branch and exposes only that there exists a queue with `next.activeQueue = some queue` and `queueShapeValid queue`.
+Here `queueShapeValid` is only the activation-level predicate `queue.num = virtioQueueNumMax \land queue.descAddr.value \neq 0 \land queue.availAddr.value \neq 0 \land queue.usedAddr.value \neq 0`; the later planner/request theorems add the accepted descriptor geometry and descriptor-validity facts, and, as noted above, the activation theorem still stops short of exporting the separate latching equality needed for the CVE chain.
+The rest of the proof chain uses that witness rather than assuming the accepted shape axiomatically.
 \end{proof}
 
 \begin{theorem}[Current structural safety is only for the accepted virtio-rng request shape]
@@ -44,59 +101,733 @@ The current structural-safety theorem is intentionally narrow: queue size is fix
 
 \begin{proof}
 \leanok
-This matches the proof engineer guide exactly: the repo does not yet claim a general reachable-descriptor-chain theorem, only the accepted virtio-rng request shape that the current Linux path uses.
+\uses{thm:queue-activation, thm:rng-proof-kernel}
+The proof unwraps the planner-validity theorem in \Cref{thm:planner-validity-kernel}, namely `buildDeterministicEntropyCompletionPlan_encodes_validity`, and extracts the specific conjuncts that matter for structural safety: `queue.num = 1`, `head = 0`, rejection of `NEXT` and `INDIRECT`, and `descNext = 0`.
+In other words, the public theorem is obtained by projecting the structural part of the planner-validity theorem rather than by proving a separate general chain argument.
+That is why the result is rigorous and also intentionally narrow.
 \end{proof}
 
 \begin{theorem}[Descriptor-validity invariants survive the current accepted path]
 \label{thm:descriptor-validity}
-\lean{Microvmm.virtioAcceptedRngRequestSatisfiesDescriptorValidityInvariants, Microvmm.virtioPreservedQueueTransitionPreservesDescriptorValidity, Microvmm.linuxPlatformProcessQueuePreservesDescriptorValidity, Microvmm.linuxInteractiveProcessQueueStepPreservesDescriptorValidity}
+\lean{Microvmm.virtioAcceptedRngRequestSatisfiesDescriptorValidityInvariants, Microvmm.virtioPreservedQueueTransitionPreservesDescriptorValidity, Microvmm.linuxPlatformProcessQueuePreservesDescriptorValidity, Microvmm.linuxSerialProcessQueueStepPreservesDescriptorValidity, Microvmm.linuxInteractiveProcessQueueStepPreservesDescriptorValidity}
 \leanok
-For that same accepted shape, the current proof surface packages descriptor validity at acceptance time and shows that the current preserved-queue and Linux-facing `processQueue` steps carry the same judgment forward.
+For that same accepted shape, the current proof surface packages descriptor validity at acceptance time and then reuses one preserved-queue transport step in parallel for the decoded PCI write layer, the Linux platform handler, and the serial-loop and interactive-loop `processQueue` steps.
 \end{theorem}
 
 \begin{proof}
 \leanok
-\uses{thm:queue-structure}
-This is a real current safety slice, but it is still scoped to the accepted virtio-rng shape rather than arbitrary queue sizes or arbitrary descriptor chains.
+\uses{thm:queue-activation, thm:queue-structure, thm:rng-proof-kernel, thm:pci-transport, thm:linux-platform-internals, thm:linux-runtime-internals}
+The proof has four explicit steps.
+The activation theorem in \Cref{thm:activation-kernel}, namely `writeQueueReady_one_establishes_queueShapeValid`, provides the active-queue witness used to fix the accepted shape.
+The planner-validity theorem in \Cref{thm:planner-validity-kernel}, namely `buildDeterministicEntropyCompletionPlan_encodes_validity`, packages the geometry, index, flag, non-chaining, and payload-span checks for an accepted request.
+The descriptor bridge theorem in \Cref{thm:descriptor-equivalence-kernel}, namely `descriptorValidForDevice_iff_preserved_queue`, shows that those checks survive any transition that preserves the live queue.
+The Linux-facing theorems grouped in \Cref{thm:pci-transport}, \Cref{thm:linux-platform-internals}, and \Cref{thm:linux-runtime-internals} do not form one sequential shell stack; rather, they are parallel instances of that same transport step for the decoded PCI write layer, the Linux platform BAR/MMIO handlers, and the serial and interactive runtime shells.
+So this public theorem records one packaged descriptor-validity judgment together with several sibling transport theorems, not a fresh local proof at each layer and not one long sequential chain.
 \end{proof}
+
+\section{From Pure Planner To Real Memory Writes}
+
+The next gap is between pure proof and effectful execution.
+The planner theorems describe what the virtio-rng completion should do.
+The executor theorems show that the live implementation actually performs that same write trace through the Lean guest-memory wrappers that sit immediately above the raw shim boundary.
 
 \begin{theorem}[The executor and public completion path realize the planned write length]
 \label{thm:executor-trace}
 \lean{Microvmm.virtioRngAcceptedRequestWritesExactlyRequestedBufferLength, Microvmm.virtioRngExecutorReportsPureCompletionTrace, Microvmm.virtioRngPublicCompletionRefinesPureCompletionTrace}
 \leanok
-For the current accepted virtio-rng request shape, the pure planner fixes the completion length, and the real executor plus public completion entry point realize exactly that plan-derived trace.
+For the current accepted virtio-rng request shape, the pure planner fixes the completion length, and the real executor plus public completion entry point realize exactly that same plan-derived write trace.
 \end{theorem}
 
 \begin{proof}
 \leanok
-\uses{thm:queue-structure}
-This is the bridge from the narrow accepted-shape planner theorem to the real execution path: the current proofs do not yet claim whole-loop liveness, but they do recover the exact completion trace of the successful branch.
+\uses{thm:queue-structure, thm:rng-proof-kernel, thm:executor-kernel, thm:kvm-wrapper-transparency}
+The proof first uses `virtioRngAcceptedRequestWritesExactlyRequestedBufferLength` to identify the pure planner's length claim.
+It then applies the executor-report theorem in \Cref{thm:executor-success-report}, namely `realizeDeterministicEntropyCompletionPlan_success_reports_trace`, to show that the live executor returns exactly that plan and its concrete write trace.
+The wrapper-realization theorem in \Cref{thm:wrapper-trace-realization}, namely `executeVirtioEntropyWriteTrace_realizes_wrappers`, supplies the final step from reported trace to realized Lean guest writes, and the public-lift theorem in \Cref{thm:public-completion-success}, namely `completeDeterministicEntropyRequestWithReport_success_refines_executor`, lifts the same fact to the exported completion entry point.
+So the public theorem is the composition of planner equality, executor report recovery, and wrapper realization.
 \end{proof}
 
-\begin{theorem}[Accepted virtio-rng accesses stay within validated guest regions]
+\begin{theorem}[Accepted virtio-rng planner-access regions are validated]
 \label{thm:validated-accesses}
 \lean{Microvmm.virtioRngAcceptedRequestAccessesStayWithinValidatedRegions}
 \leanok
-For the current accepted virtio-rng request shape, every executor read and completion write stays within guest-memory regions that were validated before execution.
+For the current accepted virtio-rng request shape, the accepted plan proves that the executor-read regions and completion-write regions are validated before execution.
 \end{theorem}
 
 \begin{proof}
 \leanok
-\uses{thm:queue-structure, thm:executor-trace}
-This is a proved narrow safety theorem, but it is no longer the headline claim: the guide's emphasis is that it holds only for the current accepted virtio-rng shape and successful completion path.
+\uses{thm:queue-structure, thm:rng-proof-kernel}
+The public theorem is a direct wrapper around the planner-access theorem in \Cref{thm:planner-access-kernel}, namely `buildDeterministicEntropyCompletionPlan_some_implies_memoryAccessesStayWithinValidatedRegions`.
+Its Lean conclusion is exactly the planner-level package `deterministicEntropyExecutorReadRegionsValidated ... \land deterministicEntropyCompletionWriteRegionsValidated ...` for the accepted branch.
+So at this theorem boundary the content is still planner-side: both the bounded executor-read regions and the bounded completion-write regions are certified before any separate live-execution trace argument is invoked.
+By itself this theorem therefore does not yet package a full runtime memory-safety claim; what is not yet exported is the follow-on theorem that combines `deterministicEntropyCompletionWriteRegionsValidated` with \Cref{thm:executor-trace} to state that the successful executor/public-completion path realizes completion writes only inside those planner-validated payload and used-ring regions.
 \end{proof}
+
+\section{Linux Runtime Path And Trusted Boundary}
+
+The remaining question is whether the same executor story is really the one exercised by the documented Linux runtime path.
+The answer is yes for the successful `processQueue` branch, and the current proof surface is explicit about where that argument stops: the Lean theorems reach a named raw-boundary predicate, while the behavioral correctness of the raw extern/C shim below that predicate remains trusted.
 
 \begin{theorem}[The documented Linux virtio path reaches the named raw boundary]
 \label{thm:shim-boundary}
-\lean{Microvmm.linuxPlatformProcessQueueRefines, Microvmm.linuxInteractiveProcessQueueStepRefinesUpToRawBoundary, Microvmm.linuxVirtioRawBoundary_holds}
+\lean{Microvmm.linuxPlatformProcessQueueRefines, Microvmm.linuxSerialProcessQueueStepRefinesUpToRawBoundary, Microvmm.linuxInteractiveProcessQueueStepRefinesUpToRawBoundary, Microvmm.linuxVirtioRawBoundary_holds}
 \leanok
-On the documented interactive Linux/initrd path, the successful virtio-rng `processQueue` branch refines to the named raw boundary above shim-backed MMIO observation, guest-memory wrappers, and IRQ requests.
+On the documented Linux/initrd path, the BAR handler and the serial and interactive MMIO-loop `processQueue` branches recover the same executor report and carry it up to the named raw boundary above shim-backed MMIO observation, guest-memory wrappers, and IRQ requests.
 \end{theorem}
 
 \begin{proof}
 \leanok
-\uses{thm:executor-trace}
-This remains a successful-branch refinement theorem, not a liveness result, and it still does not verify `ffi/shim.c` itself. It makes the remaining trusted boundary explicit instead of hiding it.
+\uses{thm:descriptor-validity, thm:executor-trace, thm:pci-transport, thm:linux-platform-internals, thm:linux-runtime-internals, thm:kvm-boundary}
+The proof runs down the actual runtime stack.
+The BAR action theorem in \Cref{thm:linux-bar-action}, namely `handleLinuxVirtioPciBarAction_processQueue_refines`, proves that the BAR action itself reaches the executor and recovers its report.
+The platform theorems in \Cref{thm:linux-bar-access}, \Cref{thm:linux-mmio-access}, and \Cref{thm:linux-mmio-exit}, namely `handleLinuxVirtioPciBarAccess_write_processQueue_refines`, `handleLinuxMmioAccess_virtioPciBar_processQueue_refines`, and `handleLinuxMmioExit_virtioPciBar_processQueue_refines`, lift that fact through the Linux platform access and MMIO-exit shells.
+The runtime theorems in \Cref{thm:linux-serial-runtime,thm:linux-interactive-runtime}, namely `runLinuxSerialLoop_mmio_processQueue_step_refines_upToRawBoundary` and `runLinuxInteractiveLoop_mmio_processQueue_step_refines_upToRawBoundary`, then place the same recovered report inside one explicit successful loop step each; they are all-success conditional theorems, not progress or termination arguments for the surrounding loops.
+Finally, the boundary theorem in \Cref{thm:kvm-boundary}, namely `linuxVirtioRawBoundary_holds`, is a universal Lean reduction step: for any `vm`, `vcpu`, `runArea`, and `guestMemory`, it composes the transparency and boundary-packaging results surfaced in \Cref{thm:kvm-wrapper-transparency,thm:raw-boundary-packages} to show that the wrapper layer satisfies the named predicate `LinuxVirtioRawBoundary`.
+Its role here is documentary: it records exactly which wrapper family and trust boundary the runtime theorems stop at, while the substantive runtime content remains in the recovered-report and `IOResultRunsTo` conjuncts proved by the serial and interactive step theorems.
+That theorem does not prove the behavior of the raw extern/C shim underneath the predicate; the residual trust is exactly that `Microvmm/FFI.lean` and `ffi/shim.c` faithfully perform the guest-memory reads and writes, faithfully report KVM run/exit and MMIO observations, and faithfully deliver the IRQ requests described by that boundary contract.
+So this proof block now names the concrete theorem chain from runtime branch to boundary rather than restating the claim.
+\end{proof}
+
+\chapter{Proof Layers Beneath The Public Claims}
+
+The previous chapter states the current public safety claims.
+This chapter surfaces the rest of the current Lean proof tree beneath them.
+Some nodes in this chapter are organizational grouping/indexing nodes kept for dependency visibility; when so, they surface existing declarations or previously stated theorem families rather than adding new mathematical content beyond those children.
+
+\section{Shared Predicates And Core Device Proofs}
+
+\begin{theorem}[Index node: Shared predicates package the invariants used throughout the proof tree]
+\label{thm:spec-predicates}
+\lean{Microvmm.queueConfigLatched, Microvmm.preservesLiveQueue, Microvmm.queueShapeValid, Microvmm.descriptorValidityInvariants, Microvmm.descriptorValidForDevice}
+\leanok
+This organizational node surfaces the small reusable predicate layer that the current proof tree is organized around: queue latching, preserved live queues, accepted queue shape, packaged descriptor-validity invariants, and the device-indexed descriptor-validity judgment.
+\end{theorem}
+
+\begin{proof}
+\leanok
+This grouping/indexing node surfaces existing declarations rather than adding a further theorem beyond them.
+These declarations live in `Microvmm/Proof/Virtio/Spec.lean` and `Microvmm/Proof/Virtio/Rng.lean` and package the exact invariants later theorem families reuse.
+Concretely, the current `queueShapeValid` predicate is exactly the conjunction `queue.num = virtioQueueNumMax`, `queue.descAddr.value ≠ 0`, `queue.availAddr.value ≠ 0`, and `queue.usedAddr.value ≠ 0`.
+They speak directly about the runtime state implemented in `Microvmm/Device/Virtio/Core.lean` and `Microvmm/Device/Virtio/Rng.lean`.
+Without this shared layer, each transport and Linux proof would have to restate the queue and descriptor invariants locally instead of citing one common judgment.
+\end{proof}
+
+\begin{theorem}[Activation exposes the accepted queue-shape witness]
+\label{thm:activation-kernel}
+\lean{Microvmm.writeQueueReady_one_establishes_queueShapeValid}
+\leanok
+The activation kernel theorem is the concrete proof step behind the public activation claim: a successful `QueueReady := 1` write yields some queue `queue` with `next.activeQueue = some queue` and `queueShapeValid queue`.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates}
+This theorem isolates the successful activation branch and returns the exact reusable witness consumed by later public theorems: there exists a queue `queue` with `next.activeQueue = some queue` and `queueShapeValid queue`.
+It is the first real proof step in the virtio-rng chain: before any structural, descriptor, or access-region reasoning, the proof establishes that execution has reached a queue satisfying the accepted shape predicate.
+It likewise stops at the active-queue witness; as noted in the opening overview, the missing reusable export is the activation-to-latching conclusion `next.latchedQueue = some queue` or `queueConfigLatched next`.
+\end{proof}
+
+\begin{theorem}[Field-specific post-activation writes preserve the live queue]
+\label{thm:core-write-preservation}
+\lean{Microvmm.writeQueueNum_preservesLiveQueue_whenActive, Microvmm.writeQueueReady_preservesLiveQueue_whenActive, Microvmm.writeQueueAddr_preservesLiveQueue_whenActive}
+\leanok
+At the shared virtio core, the three post-activation queue-register write families all conclude the same fact: the resulting state preserves the live queue.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates}
+These are the three concrete theorem cases that sit directly under the public queue-immutability statement.
+Each theorem handles one write family and proves the same predicate `preservesLiveQueue`, which is why later proof layers can reason uniformly about post-activation rewrites instead of splitting again on queue size, queue ready, and queue address.
+\end{proof}
+
+\begin{theorem}[Notify preserves the live queue]
+\label{thm:notify-preserves-live-queue}
+\lean{Microvmm.markQueueNotified_preservesLiveQueue}
+\leanok
+At the shared virtio core, the notify helper also concludes `preservesLiveQueue`: notification records that a queue was kicked without changing the active or latched queue used for execution.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates}
+This theorem isolates the notify-side preservation fact that later decoded MMIO and PCI notify proofs reuse.
+Unlike the three post-activation queue-register write theorems in \Cref{thm:core-write-preservation}, it is not about queue reconfiguration; it says that `markQueueNotified` only updates diagnostic notify state and therefore leaves the live queue unchanged.
+\end{proof}
+
+\begin{theorem}[Preserved live queues keep the latching invariant]
+\label{thm:latching-bridge}
+\lean{Microvmm.preservesLiveQueue_keeps_queueConfigLatched}
+\leanok
+The bridge from queue immutability to the CVE-facing claim is a single theorem: if a transition preserves the live queue and the starting state is already latched, then the ending state is also latched.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates}
+This theorem performs the logical conversion from `preservesLiveQueue` to `queueConfigLatched`.
+It is the exact bridge that turns transport-agnostic immutability facts into the mutation-after-activation safety claim.
+\end{proof}
+
+\begin{theorem}[The CVE corollaries package the bridge for each rewritten field]
+\label{thm:cve-corollaries}
+\lean{Microvmm.cve_2026_5747_queueNum_postActivation_safe, Microvmm.cve_2026_5747_queueReady_postActivation_safe, Microvmm.cve_2026_5747_queueAddr_postActivation_safe}
+\leanok
+The CVE module packages the latching bridge into the three field-specific mutation-after-activation corollaries for queue size, queue ready, and queue address.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:core-write-preservation, thm:latching-bridge}
+Each corollary is proved by the same composition: use the corresponding write-preservation theorem from \Cref{thm:core-write-preservation} to obtain `preservesLiveQueue`, then apply the bridge theorem in \Cref{thm:latching-bridge}, namely `preservesLiveQueue_keeps_queueConfigLatched`, to recover `queueConfigLatched` after the write.
+This grouped node is organizational: it does not add a new theorem beyond the three corollaries, but makes that common pattern explicit.
+\end{proof}
+
+\begin{theorem}[Index node: The shared virtio core proves the mutation-after-activation ladder]
+\label{thm:core-cve-internals}
+\lean{Microvmm.writeQueueNum_preservesLiveQueue_whenActive, Microvmm.writeQueueReady_preservesLiveQueue_whenActive, Microvmm.writeQueueAddr_preservesLiveQueue_whenActive, Microvmm.preservesLiveQueue_keeps_queueConfigLatched, Microvmm.cve_2026_5747_queueNum_postActivation_safe, Microvmm.cve_2026_5747_queueReady_postActivation_safe, Microvmm.cve_2026_5747_queueAddr_postActivation_safe}
+\leanok
+Below the public queue-immutability and CVE theorems, the Lean proof tree contains the actual ladder that discharges them: post-activation queue writes preserve the live queue, preserved live queues keep latching, and the three concrete CVE corollaries for queue size, queue ready, and queue address follow from those facts.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:core-write-preservation, thm:latching-bridge, thm:cve-corollaries}
+This organizational summary node does not add a new mathematical claim beyond its cited children; it keeps the exact ladder visible in one place.
+The three write-preservation theorems in \Cref{thm:core-write-preservation} establish `preservesLiveQueue` for the three queue-register families.
+The bridge theorem in \Cref{thm:latching-bridge} converts that predicate into preservation of `queueConfigLatched`.
+The three CVE corollaries in \Cref{thm:cve-corollaries} then package those conversions into the statements re-exported by the public proof surface.
+\end{proof}
+
+\section{Pure Virtio-rng Planning And Execution}
+
+\begin{theorem}[Planner validity packages the accepted request checks]
+\label{thm:planner-validity-kernel}
+\lean{Microvmm.buildDeterministicEntropyCompletionPlan_encodes_validity}
+\leanok
+The planner-validity theorem is the core accepted-request proof: whenever the pure completion planner succeeds, it returns exactly the queue-geometry, head, flag, non-chaining, and payload-span checks required for the current virtio-rng shape.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates, thm:activation-kernel}
+This theorem is the source of most later structural and descriptor facts.
+Rather than proving geometry, head, flags, and span constraints independently at each later layer, the proof tree derives them once from successful planner construction and then projects or transports the needed conjuncts.
+\end{proof}
+
+\begin{theorem}[Descriptor validity is invariant under preserved live queues]
+\label{thm:descriptor-equivalence-kernel}
+\lean{Microvmm.descriptorValidForDevice_iff_preserved_queue}
+\leanok
+The preserved-queue equivalence theorem states the key transport invariant: if a transition preserves the live queue, then the packaged descriptor-validity judgment is equivalent before and after that transition.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:spec-predicates, thm:core-write-preservation}
+This theorem is the bridge that lets transport and runtime layers reuse a descriptor-validity judgment instead of reproving local queue arithmetic.
+Once a lower layer has shown `preservesLiveQueue`, this theorem transports `descriptorValidForDevice` across the transition in one step.
+\end{proof}
+
+\begin{theorem}[Planner access regions are already proved at the pure layer]
+\label{thm:planner-access-kernel}
+\lean{Microvmm.buildDeterministicEntropyCompletionPlan_some_implies_memoryAccessesStayWithinValidatedRegions}
+\leanok
+The pure planner already proves the memory-safety core used later by the public access theorem: the accepted-path executor reads and completion writes stay inside already validated queue and payload regions.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:planner-validity-kernel}
+This theorem refines the planner-validity package in \Cref{thm:planner-validity-kernel} one step farther, from structural and span checks to the exact access windows touched by the accepted plan.
+It is the lower theorem that the public validated-access claim simply exposes.
+\end{proof}
+
+\begin{theorem}[Index node: The virtio-rng proof kernel packages accepted-shape planning and DMA targets]
+\label{thm:rng-proof-kernel}
+\lean{Microvmm.deterministicEntropyDmaTargetsOfDevice, Microvmm.buildDeterministicEntropyCompletionPlan_encodes_validity, Microvmm.buildDeterministicEntropyCompletionPlan_some_implies_memoryAccessesStayWithinValidatedRegions, Microvmm.descriptorValidForDevice_iff_preserved_queue}
+\leanok
+The central virtio-rng proof module packages the accepted request shape, the DMA targets derived from the active queue, the planner-level encoding of descriptor validity, the preserved-queue equivalence theorem for descriptor validity, and the memory-access theorem for the resulting completion plan.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:planner-validity-kernel, thm:descriptor-equivalence-kernel, thm:planner-access-kernel}
+This organizational summary node is the part of the proof tree that later layers cite as the virtio-rng kernel; it indexes existing lower theorems rather than adding a new theorem on top of them.
+The planner-validity theorem in \Cref{thm:planner-validity-kernel} supplies the accepted-request checks.
+The preserved-queue equivalence theorem in \Cref{thm:descriptor-equivalence-kernel} explains how those checks move through later transitions.
+The planner access theorem in \Cref{thm:planner-access-kernel} gives the exact read/write region statement that the public safety claim exports.
+\end{proof}
+
+\begin{theorem}[Write traces are realized by the Lean guest-memory wrappers]
+\label{thm:wrapper-trace-realization}
+\lean{Microvmm.executeVirtioEntropyWriteTrace_realizes_wrappers}
+\leanok
+The wrapper-realization theorem states that the executor's abstract write trace is realized in order by the Lean guest-write wrappers that sit immediately above the raw FFI boundary.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:kvm-wrapper-transparency}
+This theorem is the bottom Lean-side execution step: it connects the executor's trace semantics to the concrete wrapper calls later used by the runtime proofs.
+Without it, the proof tree would stop at an abstract trace rather than at an implementation-facing sequence of guest writes.
+\end{proof}
+
+\begin{theorem}[Successful executor runs report the exact planned trace]
+\label{thm:executor-success-report}
+\lean{Microvmm.realizeDeterministicEntropyCompletionPlan_success_reports_trace}
+\leanok
+The executor-success theorem says that a successful run of the live executor returns the exact plan and write trace predicted by the pure completion plan.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:planner-validity-kernel, thm:wrapper-trace-realization}
+This theorem is the main refinement step from pure planning to effectful execution.
+It takes a successful executor run and reconstructs the exact plan, trace, PRNG update, and completion-facing state facts from that run.
+\end{proof}
+
+\begin{theorem}[The public completion entry point refines to the executor report]
+\label{thm:public-completion-success}
+\lean{Microvmm.completeDeterministicEntropyRequestWithReport_success_refines_executor}
+\leanok
+The exported completion function preserves the same report, write trace, and state-update facts proved for the underlying executor.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:executor-success-report}
+This is the final wrapper theorem around the executor.
+It shows that the public IO entry point does not weaken the executor theorem in \Cref{thm:executor-success-report}; it merely re-exports it at the user-facing function boundary.
+\end{proof}
+
+\begin{theorem}[Index node: Executor-level proofs connect the pure plan to real guest-memory writes]
+\label{thm:executor-kernel}
+\lean{Microvmm.executeVirtioEntropyWriteTrace_realizes_wrappers, Microvmm.realizeDeterministicEntropyCompletionPlan_success_reports_trace, Microvmm.completeDeterministicEntropyRequestWithReport_success_refines_executor}
+\leanok
+The executor proof module shows that the live virtio-rng completion path emits exactly the plan-derived write trace and realizes that trace through the Lean guest-memory wrappers before control reaches the raw shim boundary.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:wrapper-trace-realization, thm:executor-success-report, thm:public-completion-success}
+This organizational summary node names the three executor facts in the order they are used; it is an index node over those existing theorems, not an extra refinement claim.
+First the trace is tied to Lean guest-write wrappers by \Cref{thm:wrapper-trace-realization}.
+Then successful executor runs are shown to report exactly the planned trace by \Cref{thm:executor-success-report}.
+Finally the public completion entry point is shown to preserve that same executor report by \Cref{thm:public-completion-success}.
+\end{proof}
+
+\section{Decoded Transport Proofs}
+
+\begin{theorem}[Decoded MMIO queue-register writes preserve post-activation safety]
+\label{thm:mmio-queue-safety}
+\lean{Microvmm.virtioMmioWriteOffset_queueNum_postActivation_safe, Microvmm.virtioMmioWriteOffset_queueReady_postActivation_safe, Microvmm.virtioMmioWriteOffset_queueAddr_postActivation_safe}
+\leanok
+The decoded MMIO transport proves the three post-activation queue-safety cases at the actual MMIO write-offset layer.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:core-cve-internals}
+Each theorem takes one decoded MMIO queue-register family and reuses the core write-preservation and CVE ladder collected in \Cref{thm:core-cve-internals} at the transport entry point actually exercised by the standalone MMIO path.
+\end{proof}
+
+\begin{theorem}[Decoded MMIO queue-register writes preserve descriptor validity]
+\label{thm:mmio-descriptor-validity}
+\lean{Microvmm.virtioMmioWriteOffset_queueNum_preserves_descriptorValidity, Microvmm.virtioMmioWriteOffset_queueReady_preserves_descriptorValidity, Microvmm.virtioMmioWriteOffset_queueAddr_preserves_descriptorValidity}
+\leanok
+The decoded MMIO transport also proves that the packaged `descriptorValidForDevice` judgment survives those same post-activation queue-register writes.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:descriptor-equivalence-kernel, thm:mmio-queue-safety}
+The proof pattern is uniform: use the decoded MMIO write theorem to recover the corresponding preserved-live-queue fact, then transport `descriptorValidForDevice` with the bridge theorem in \Cref{thm:descriptor-equivalence-kernel}, namely `descriptorValidForDevice_iff_preserved_queue`.
+\end{proof}
+
+\begin{theorem}[Decoded MMIO notify writes refine directly to executor completion]
+\label{thm:mmio-notify-refinement}
+\lean{Microvmm.virtioMmioWriteOffset_notify_then_complete_refines}
+\leanok
+At the decoded MMIO notify offset, the transport proof composes the notify write with the executor theorem and recovers the resulting completion report.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:notify-preserves-live-queue, thm:executor-kernel}
+In prose, the executor-side refinement chain applies only once the post-notify device state is known to still expose the same accepted live queue that the earlier planner and transport reasoning validated.
+The local reason is the core theorem in \Cref{thm:notify-preserves-live-queue}, namely `markQueueNotified_preservesLiveQueue`: the notify step only flips a diagnostic notify bit and does not rewrite the live or latched queue state used for execution.
+With that preserved-live-queue fact for the decoded MMIO notify branch, the proof then invokes the executor refinement chain in \Cref{thm:executor-kernel} to recover the completion report and trace from the notify branch.
+\end{proof}
+
+\begin{theorem}[The MMIO shells recover the decoded transport proof at the access, exit, and loop layers]
+\label{thm:mmio-shell-refinement}
+\lean{Microvmm.handleVirtioMmioAccess_processQueue_refines, Microvmm.handleVirtioMmioExit_observed_processQueue_refines, Microvmm.runVirtioEntropyLoop_mmio_processQueue_step_refines_upToRawBoundary}
+\leanok
+The explicit MMIO-access helper, observed MMIO-exit helper, and one-step standalone loop theorem all recover the same notify-to-executor result at progressively more concrete runtime shells.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:mmio-notify-refinement, thm:kvm-boundary}
+The access theorem pushes the decoded notify refinement from \Cref{thm:mmio-notify-refinement} through `handleVirtioMmioAccess`.
+The exit theorem adds recovery of the observed MMIO access from the observer theorems grouped in \Cref{thm:kvm-mmio-observer-transparency}.
+The loop theorem then places the same result inside the actual one-step standalone loop and stops at the explicit raw boundary in \Cref{thm:kvm-boundary}.
+\end{proof}
+
+\begin{theorem}[Index node: The standalone MMIO transport carries the same queue and executor invariants]
+\label{thm:mmio-transport}
+\lean{Microvmm.virtioMmioWriteOffset_queueNum_postActivation_safe, Microvmm.virtioMmioWriteOffset_queueReady_postActivation_safe, Microvmm.virtioMmioWriteOffset_queueAddr_postActivation_safe, Microvmm.virtioMmioWriteOffset_queueNum_preserves_descriptorValidity, Microvmm.virtioMmioWriteOffset_queueReady_preserves_descriptorValidity, Microvmm.virtioMmioWriteOffset_queueAddr_preserves_descriptorValidity, Microvmm.virtioMmioWriteOffset_notify_then_complete_refines, Microvmm.handleVirtioMmioAccess_processQueue_refines, Microvmm.handleVirtioMmioExit_observed_processQueue_refines, Microvmm.runVirtioEntropyLoop_mmio_processQueue_step_refines_upToRawBoundary}
+\leanok
+The standalone MMIO proof module lifts the shared virtio queue and executor invariants through the decoded MMIO write helper, the explicit MMIO-access shell, the observed MMIO-exit shell, and the one-step standalone run-loop branch.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:mmio-queue-safety, thm:mmio-descriptor-validity, thm:mmio-notify-refinement, thm:mmio-shell-refinement}
+This organizational summary node does not introduce a new theorem beyond its children; it names the decoded MMIO chain in order: queue safety at write offsets in \Cref{thm:mmio-queue-safety}, descriptor transport across those writes in \Cref{thm:mmio-descriptor-validity}, notify refinement into the executor in \Cref{thm:mmio-notify-refinement}, and then access/exit/loop shells above that transport result in \Cref{thm:mmio-shell-refinement}.
+\end{proof}
+
+\begin{theorem}[Decoded PCI queue-register writes preserve post-activation safety]
+\label{thm:pci-queue-safety}
+\lean{Microvmm.virtioPciBarWriteOffset_queueNum_postActivation_safe, Microvmm.virtioPciBarWriteOffset_queueReady_postActivation_safe, Microvmm.virtioPciBarWriteOffset_queueAddr_postActivation_safe}
+\leanok
+At the decoded PCI BAR/common-config layer, the three queue-register write families preserve the same post-activation safety and queue-latching facts used by the public claim.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:core-cve-internals}
+Each theorem is the PCI transport analogue of the shared core write-preservation ladder in \Cref{thm:core-cve-internals}, specialized to the decoded BAR/common-config entry points that the Linux guest actually exercises.
+\end{proof}
+
+\begin{theorem}[Decoded PCI queue-register writes preserve descriptor validity]
+\label{thm:pci-descriptor-validity}
+\lean{Microvmm.virtioPciBarWriteOffset_queueNum_preserves_descriptorValidity, Microvmm.virtioPciBarWriteOffset_queueReady_preserves_descriptorValidity, Microvmm.virtioPciBarWriteOffset_queueAddr_preserves_descriptorValidity}
+\leanok
+The decoded PCI layer also transports the packaged `descriptorValidForDevice` judgment across those same post-activation queue writes.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:descriptor-equivalence-kernel, thm:pci-queue-safety}
+As in the MMIO case, the proof first recovers preserved-live-queue facts at the decoded PCI write layer and then applies the bridge theorem in \Cref{thm:descriptor-equivalence-kernel}, namely `descriptorValidForDevice_iff_preserved_queue`, to move the descriptor-validity judgment across the transition.
+\end{proof}
+
+\begin{theorem}[Decoded PCI notify writes refine to the same executor report]
+\label{thm:pci-notify-refinement}
+\lean{Microvmm.virtioPciBarWriteOffset_notify_then_complete_refines}
+\leanok
+At the decoded PCI notify path, the transport proof reaches the same executor report and trace as the standalone MMIO path.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:notify-preserves-live-queue, thm:executor-kernel}
+In prose, the executor-side refinement chain can only be applied after the decoded notify step is known not to have changed the accepted live queue that the earlier proofs analyzed.
+The local discharge is again the core theorem in \Cref{thm:notify-preserves-live-queue}, namely `markQueueNotified_preservesLiveQueue`: notification only flips the diagnostic notify bit and leaves the live and latched queue state untouched.
+With the same accepted live queue still exposed after the PCI notify write, the proof composes the post-notify device state with the executor refinement theorem chain in \Cref{thm:executor-kernel}.
+\end{proof}
+
+\begin{theorem}[Index node: The PCI BAR transport carries the Linux-facing queue and executor invariants]
+\label{thm:pci-transport}
+\lean{Microvmm.virtioPciBarWriteOffset_queueNum_postActivation_safe, Microvmm.virtioPciBarWriteOffset_queueReady_postActivation_safe, Microvmm.virtioPciBarWriteOffset_queueAddr_postActivation_safe, Microvmm.virtioPciBarWriteOffset_queueNum_preserves_descriptorValidity, Microvmm.virtioPciBarWriteOffset_queueReady_preserves_descriptorValidity, Microvmm.virtioPciBarWriteOffset_queueAddr_preserves_descriptorValidity, Microvmm.virtioPciBarWriteOffset_notify_then_complete_refines}
+\leanok
+The PCI transport proof module lifts the same post-activation queue-safety, descriptor-validity, and notify-to-executor facts through the decoded BAR/common-config write layer used by the Linux guest.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:pci-queue-safety, thm:pci-descriptor-validity, thm:pci-notify-refinement}
+This organizational summary node does not add a new theorem beyond its children; it names the exact PCI transport ladder used later by the Linux platform proofs: decoded queue-write safety in \Cref{thm:pci-queue-safety}, descriptor transport across those writes in \Cref{thm:pci-descriptor-validity}, and notify refinement into the executor in \Cref{thm:pci-notify-refinement}.
+\end{proof}
+
+\section{Linux Platform And Runtime Proofs}
+
+\begin{theorem}[The BAR action itself refines to executor completion]
+\label{thm:linux-bar-action}
+\lean{Microvmm.handleLinuxVirtioPciBarAction_processQueue_refines}
+\leanok
+The first Linux platform theorem shows that the BAR-level `processQueue` action already reaches the executor and recovers the resulting completion report.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:pci-notify-refinement}
+This theorem is the direct lift from decoded PCI notify refinement in \Cref{thm:pci-notify-refinement} to the Linux BAR action used by `Microvmm/Guest/Linux/Platform.lean`.
+It is the first point where the proof tree talks about the Linux platform state rather than only the PCI transport state.
+\end{proof}
+
+\begin{theorem}[Linux BAR access handling preserves both refinement and descriptor validity]
+\label{thm:linux-bar-access}
+\lean{Microvmm.handleLinuxVirtioPciBarAccess_write_processQueue_refines, Microvmm.handleLinuxVirtioPciBarAccess_write_processQueue_preserves_descriptorValidity}
+\leanok
+The BAR access helper lifts both parts of the current proof story through the access shell: executor refinement and preservation of the packaged descriptor-validity judgment.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-bar-action, thm:pci-descriptor-validity}
+The refinement half composes the BAR action theorem in \Cref{thm:linux-bar-action} with the BAR access shell.
+The descriptor-validity half reuses the post-write transport validity theorem in \Cref{thm:pci-descriptor-validity} for the same successful branch.
+Together they show that the Linux BAR access helper preserves both the semantic and validity halves of the proof chain.
+\end{proof}
+
+\begin{theorem}[Linux MMIO access routing preserves both refinement and descriptor validity]
+\label{thm:linux-mmio-access}
+\lean{Microvmm.handleLinuxMmioAccess_virtioPciBar_processQueue_refines, Microvmm.handleLinuxMmioAccess_virtioPciBar_processQueue_preserves_descriptorValidity}
+\leanok
+Routing a Linux MMIO access to the virtio PCI BAR preserves the same executor refinement and descriptor-validity facts established one layer lower.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-bar-access}
+This theorem adds one layer of routing and no new semantic content: once the route is known to be `.virtioPciBar`, the proof invokes the BAR access theorems in \Cref{thm:linux-bar-access} and lifts both conclusions into the full Linux MMIO-access handler.
+\end{proof}
+
+\begin{theorem}[Linux MMIO exit handling recovers the same BAR refinement]
+\label{thm:linux-mmio-exit}
+\lean{Microvmm.handleLinuxMmioExit_virtioPciBar_processQueue_refines}
+\leanok
+The observed Linux MMIO-exit shell recovers the same BAR refinement theorem at the exit-dispatch layer.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-mmio-access, thm:kvm-mmio-observer-transparency}
+This theorem composes the Linux MMIO-access theorem in \Cref{thm:linux-mmio-access} with the observer theorems grouped in \Cref{thm:kvm-mmio-observer-transparency}, which show that the MMIO access decoded from the run area is a transparent observer result.
+It is the step that brings the platform proof to the edge of the actual run-loop logic.
+\end{proof}
+
+\begin{theorem}[Index node: The Linux platform proofs connect BAR routing to the real executor path]
+\label{thm:linux-platform-internals}
+\lean{Microvmm.handleLinuxVirtioPciBarAction_processQueue_refines, Microvmm.handleLinuxVirtioPciBarAccess_write_processQueue_refines, Microvmm.handleLinuxVirtioPciBarAccess_write_processQueue_preserves_descriptorValidity, Microvmm.handleLinuxMmioAccess_virtioPciBar_processQueue_refines, Microvmm.handleLinuxMmioAccess_virtioPciBar_processQueue_preserves_descriptorValidity, Microvmm.handleLinuxMmioExit_virtioPciBar_processQueue_refines}
+\leanok
+The Linux platform proof module shows how the decoded PCI BAR transport facts lift into the Linux platform state: the BAR action and MMIO-access handlers recover the executor report and preserve the packaged descriptor-validity judgment through the real platform shell.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-bar-action, thm:linux-bar-access, thm:linux-mmio-access, thm:linux-mmio-exit}
+This organizational summary node names the actual Linux platform ladder in order and is kept for dependency visibility rather than as extra mathematical content above those child theorems.
+The BAR action theorem in \Cref{thm:linux-bar-action} is the transport-to-platform step.
+The BAR access theorem in \Cref{thm:linux-bar-access} adds the access shell and descriptor-validity transport.
+The MMIO access and MMIO exit theorems in \Cref{thm:linux-mmio-access,thm:linux-mmio-exit} then place the same result inside the real Linux MMIO handling path.
+\end{proof}
+
+\begin{theorem}[The serial loop branch reaches the refined MMIO exit and raw boundary]
+\label{thm:linux-serial-runtime}
+\lean{Microvmm.runLinuxSerialLoop_mmio_processQueue_step_refines_upToRawBoundary, Microvmm.runLinuxSerialLoop_mmio_processQueue_step_preserves_descriptorValidity}
+\leanok
+The serial loop theorem packages one successful MMIO `processQueue` step together with the corresponding descriptor-validity preservation fact; it is an all-success conditional theorem with explicit runtime hypotheses, not a loop-progress or termination proof.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-mmio-exit, thm:linux-mmio-access, thm:kvm-boundary}
+The refinement half takes the MMIO-exit theorem in \Cref{thm:linux-mmio-exit} and places it in the concrete serial loop step after the explicit successful premises about `runGuestOnce`, `runExitReason`, MMIO observation, route selection, decoded write direction, decoded queue write, and MMIO handler success have been supplied.
+The validity half reuses the MMIO-access descriptor-preservation theorem in \Cref{thm:linux-mmio-access} for the same branch.
+The pair of theorems therefore exposes both the semantic and validity consequences of one serial-loop step, and stops there rather than proving progress or eventual completion of the surrounding loop.
+\end{proof}
+
+\begin{theorem}[The interactive loop branch reaches the refined MMIO exit and raw boundary]
+\label{thm:linux-interactive-runtime}
+\lean{Microvmm.runLinuxInteractiveLoop_mmio_processQueue_step_refines_upToRawBoundary, Microvmm.runLinuxInteractiveLoop_mmio_processQueue_step_preserves_descriptorValidity}
+\leanok
+The interactive loop theorem packages the same one-step successful MMIO `processQueue` branch and descriptor-validity preservation facts for the interactive runtime path; it too is an all-success conditional theorem with explicit runtime hypotheses, not a loop-progress or termination proof.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-mmio-exit, thm:linux-mmio-access, thm:kvm-boundary}
+The structure is the same as the serial case, with one extra service step for interactive transport.
+After that service step, and again under explicit successful premises about guest run, exit decoding, MMIO observation, routing, decoded write direction, decoded queue write, and handler success, the proof reuses the MMIO-exit refinement and MMIO-access validity theorems in \Cref{thm:linux-mmio-exit,thm:linux-mmio-access} to show that the interactive branch reaches the same executor report and raw boundary.
+As in the serial case, the result is only for that one successful step and does not establish progress or termination of the surrounding loop.
+\end{proof}
+
+\begin{theorem}[Index node: The Linux runtime proofs reach the real loop branches up to the raw boundary]
+\label{thm:linux-runtime-internals}
+\lean{Microvmm.runLinuxSerialLoop_mmio_processQueue_step_refines_upToRawBoundary, Microvmm.runLinuxInteractiveLoop_mmio_processQueue_step_refines_upToRawBoundary}
+\leanok
+The Linux runtime proof module lifts the platform MMIO theorem into the actual serial and interactive loop branches that run the guest, observe an MMIO exit, and dispatch that exit through the Linux virtio path.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-serial-runtime, thm:linux-interactive-runtime}
+This organizational summary node says exactly which runtime theorems close the public chain: \Cref{thm:linux-serial-runtime} for the serial loop and \Cref{thm:linux-interactive-runtime} for the interactive loop, each with both refinement and descriptor-validity consequences for the successful branch.
+They are the final Lean runtime theorems before the explicit raw-boundary packaging below.
+\end{proof}
+
+\section{Boot, Console, And Host Support Modules}
+
+\begin{theorem}[Boot-plan layout predicates state the proved Linux placement conditions]
+\label{thm:linux-boot-layout}
+\lean{Microvmm.linuxBootPlanFinalWriteViewPlacementOk, Microvmm.linuxBootPlanWritesInRange, Microvmm.linuxBootPlanFinalWriteViewImageOk}
+\leanok
+The boot-plan support layer names the layout predicates used to talk about the normalized final-write view of Linux boot writes.
+\end{theorem}
+
+\begin{proof}
+\leanok
+These declarations define the placement conditions that the boot-plan proofs in `Microvmm/Proof/Linux/BootPlan.lean` reason over.
+They are surfaced here because they are part of the current proof tree, even though they are not on the main virtio queue-safety path.
+\end{proof}
+
+\begin{theorem}[Linux console readiness is monotone once observed]
+\label{thm:linux-console-readiness}
+\lean{Microvmm.captureSerialOutputByte_probeReady_monotone, Microvmm.captureSerialOutputByte_interactiveReady_monotone}
+\leanok
+The Linux console support layer proves that once probe readiness or interactive readiness has been observed on the serial transcript, later transcript updates cannot erase that fact.
+\end{theorem}
+
+\begin{proof}
+\leanok
+This support theorem is about the serial transcript model in `Microvmm/Guest/Linux/Console.lean`.
+It shows that readiness reasoning is monotone under later capture steps, which is why the documented Linux runtime contract can treat those readiness markers as latched observations.
+\end{proof}
+
+\begin{theorem}[Index node: The Linux boot-plan and console modules already have dedicated Lean proofs]
+\label{thm:linux-boot-console-support}
+\lean{Microvmm.linuxBootPlanFinalWriteViewPlacementOk, Microvmm.linuxBootPlanWritesInRange, Microvmm.linuxBootPlanFinalWriteViewImageOk, Microvmm.captureSerialOutputByte_probeReady_monotone, Microvmm.captureSerialOutputByte_interactiveReady_monotone}
+\leanok
+The proof tree also includes Linux-specific support modules outside the virtio queue path: boot-plan placement and in-range predicates for the normalized final-write view, plus monotonicity theorems for observed Linux and initrd readiness on the serial transcript.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:linux-boot-layout, thm:linux-console-readiness}
+This organizational summary node simply groups the two Linux support slices already surfaced one level lower: boot-plan layout predicates in \Cref{thm:linux-boot-layout} and serial-readiness monotonicity in \Cref{thm:linux-console-readiness}.
+\end{proof}
+
+\begin{theorem}[Serial replay remains bounded and length-preserving]
+\label{thm:serial-replay-bounds}
+\lean{Microvmm.SerialReplayBuffer.pushBounded_size_le, Microvmm.SerialReplayBuffer.toOutputBytes_length}
+\leanok
+The replay support layer proves that replay capture stays within its configured bound and that its byte-array and list views agree on length.
+\end{theorem}
+
+\begin{proof}
+\leanok
+These theorems justify the replay model in `Microvmm/Host/SerialModel.lean`.
+They make the support reasoning about late-attach transcript replay precise instead of leaving it as an implementation convention.
+\end{proof}
+
+\begin{theorem}[Host console runtime operations preserve bounded structure]
+\label{thm:host-console-bounds}
+\lean{Microvmm.queueConsoleClientOutput_pendingOutput_bounded, Microvmm.attachConsoleServerClient_clients_length}
+\leanok
+The host console support layer proves bounded per-client output queues and controlled structural growth when a client attaches.
+\end{theorem}
+
+\begin{proof}
+\leanok
+These theorems justify the pure console-runtime state transitions in `Microvmm/Host/ConsoleRuntime.lean`.
+They are support theorems rather than part of the virtio queue-safety chain, but they are real pieces of the current Lean proof tree.
+\end{proof}
+
+\begin{theorem}[Index node: Host console and replay modules already have boundedness proofs]
+\label{thm:host-console-support}
+\lean{Microvmm.queueConsoleClientOutput_pendingOutput_bounded, Microvmm.attachConsoleServerClient_clients_length, Microvmm.SerialReplayBuffer.pushBounded_size_le, Microvmm.SerialReplayBuffer.toOutputBytes_length}
+\leanok
+The current Lean proof tree also includes host-facing support modules: replay capture stays within its configured tail bound, the replay representation preserves length, client output queues stay bounded, and attaching a client changes the runtime structure in a controlled way.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:serial-replay-bounds, thm:host-console-bounds}
+This organizational summary node groups the replay-bounds and host-console-bounds theorems already named explicitly one level lower in \Cref{thm:serial-replay-bounds,thm:host-console-bounds}; it is an index node, not a further boundedness theorem.
+\end{proof}
+
+\section{KVM Transparency And The Trusted Shim Boundary}
+
+\begin{theorem}[Guest-memory wrapper calls are transparent decoders over raw FFI writes and reads]
+\label{thm:kvm-guest-memory-transparency}
+\lean{Microvmm.guestReadU16_defeq_raw, Microvmm.guestReadU32_defeq_raw, Microvmm.guestWriteU8_defeq_raw, Microvmm.guestWriteU16_defeq_raw, Microvmm.guestWriteU32_defeq_raw}
+\leanok
+At the KVM resource layer, the guest-memory read and write wrappers used by the virtio path are transparent decoders over the corresponding raw FFI calls.
+\end{theorem}
+
+\begin{proof}
+\leanok
+These `_defeq_raw` theorems are the concrete bottom-layer facts for guest-memory access, and in `Microvmm/Proof/Kvm/Resource.lean` they are proved by definitional reduction (`rfl`).
+So there is no extra proof work hidden in the wrapper layer: after unfolding the definitions, the Lean wrappers are literally the corresponding raw FFI calls.
+The delegated trust is therefore the correctness of the FFI definitions and extern declarations in `Microvmm/FFI.lean` together with the behavior of `ffi/shim.c` beneath them.
+\end{proof}
+
+\begin{theorem}[Run-entry and MMIO-observer calls are transparent decoders over raw FFI state]
+\label{thm:kvm-mmio-observer-transparency}
+\lean{Microvmm.runGuestOnce_defeq_raw, Microvmm.runExitReason_defeq_raw, Microvmm.readMmioAccess_defeq_observers}
+\leanok
+The run entry and MMIO observation wrappers are likewise transparent decoders over the raw run-area state and raw FFI observer calls.
+\end{theorem}
+
+\begin{proof}
+\leanok
+These theorems are the observation-side analogue of guest-memory transparency.
+For the `_defeq_raw` members of this family, namely `runGuestOnce_defeq_raw` and `runExitReason_defeq_raw`, the proof is again `rfl`; `readMmioAccess_defeq_observers` is the matching observer-side reduction theorem.
+So this layer is still just exposing raw state and observer structure, and the delegated trust remains the correctness of the FFI definitions and extern declarations plus the behavior of `ffi/shim.c`, not additional semantic proof work in Lean.
+\end{proof}
+
+\begin{theorem}[IRQ requests are transparent wrappers over the raw FFI call]
+\label{thm:kvm-irq-transparency}
+\lean{Microvmm.setIrqLine_defeq_raw}
+\leanok
+The IRQ wrapper used by the Linux virtio path is proved to call the raw IRQ extern without adding extra stateful behavior on the Lean side.
+\end{theorem}
+
+\begin{proof}
+\leanok
+`setIrqLine_defeq_raw` is likewise proved by `rfl`, so the Lean wrapper adds no extra stateful behavior beyond the raw extern call.
+As with the other `_defeq_raw` lemmas, the trust sits below this theorem: in the FFI definition and extern declaration, and in the corresponding IRQ behavior of `ffi/shim.c`.
+It matters because the Linux raw-boundary contract includes not only guest-memory and MMIO observation, but also IRQ delivery back to the guest.
+\end{proof}
+
+\begin{theorem}[Index node: The KVM resource wrappers are transparent decoders over raw extern calls]
+\label{thm:kvm-wrapper-transparency}
+\lean{Microvmm.guestReadU16_defeq_raw, Microvmm.guestReadU32_defeq_raw, Microvmm.guestWriteU8_defeq_raw, Microvmm.guestWriteU16_defeq_raw, Microvmm.guestWriteU32_defeq_raw, Microvmm.runGuestOnce_defeq_raw, Microvmm.runExitReason_defeq_raw, Microvmm.readMmioAccess_defeq_observers, Microvmm.setIrqLine_defeq_raw}
+\leanok
+At the bottom of the currently proved virtio path, the Lean KVM resource wrappers are proved to be transparent one-step decoders over the raw guest-memory calls, MMIO observers, and IRQ extern call.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:kvm-guest-memory-transparency, thm:kvm-mmio-observer-transparency, thm:kvm-irq-transparency}
+This organizational summary node groups the three transparency families: guest-memory accessors in \Cref{thm:kvm-guest-memory-transparency}, run/MMIO observers in \Cref{thm:kvm-mmio-observer-transparency}, and IRQ delivery in \Cref{thm:kvm-irq-transparency}.
+The `_defeq_raw` pieces in those families are definitional-equality lemmas proved by `rfl`, so the remaining trust at this layer is not hidden proof work in Lean but the fidelity of the FFI definitions, extern declarations, and the `ffi/shim.c` behavior they name.
+Together they constitute the last fully Lean-side theorem layer before the explicit raw-boundary packaging.
+\end{proof}
+
+\begin{theorem}[Index node: The raw-boundary packaging theorems collect the remaining trusted assumptions]
+\label{thm:raw-boundary-packages}
+\lean{Microvmm.virtioGuestMemoryRawBoundary_holds, Microvmm.virtioObservedMmioRawBoundary_holds, Microvmm.virtioMmioRawBoundary_holds, Microvmm.linuxVirtioRawBoundary_holds}
+\leanok
+The boundary packaging theorems assemble the transparent wrapper facts into the explicit guest-memory, observed-MMIO, standalone-MMIO, and Linux-virtio boundary contracts used by the runtime theorems.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:kvm-wrapper-transparency}
+Each theorem in this organizational group packages a larger boundary contract out of the lower transparency results in \Cref{thm:kvm-wrapper-transparency}; these are Lean compositions, not extra trusted axioms.
+This is the Lean-side step that turns individual raw-wrapper facts into the named boundary predicates cited by the MMIO, Linux platform, and Linux runtime proofs.
+\end{proof}
+
+\begin{theorem}[Index node: The raw-boundary module names the remaining trusted contract above the C shim]
+\label{thm:kvm-boundary}
+\lean{Microvmm.VirtioGuestMemoryRawBoundary, Microvmm.VirtioObservedMmioRawBoundary, Microvmm.VirtioMmioRawBoundary, Microvmm.LinuxVirtioRawBoundary, Microvmm.virtioGuestMemoryRawBoundary_holds, Microvmm.virtioObservedMmioRawBoundary_holds, Microvmm.virtioMmioRawBoundary_holds, Microvmm.linuxVirtioRawBoundary_holds}
+\leanok
+The raw-boundary module packages the remaining trusted contract for the proved virtio path. Concretely, `VirtioGuestMemoryRawBoundary` names the reductions for `guestReadU16`, `guestReadU32`, `guestWriteU8`, `guestWriteU16`, and `guestWriteU32`; `VirtioObservedMmioRawBoundary` names the reductions for `runGuestOnce`, `runExitReason`, and `readMmioAccess`; and `LinuxVirtioRawBoundary` adds IRQ delivery via the raw `setIrqLine` wrapper on top of `VirtioMmioRawBoundary`. So the final named boundary is exactly guest-memory reads/writes, KVM run/exit observation, MMIO access observation, and IRQ delivery reductions to raw extern calls above `Microvmm/FFI.lean` and `ffi/shim.c`.
+\end{theorem}
+
+\begin{proof}
+\leanok
+\uses{thm:raw-boundary-packages}
+This final proof block is explicit about the inference, and the same organizational caveat applies here: `linuxVirtioRawBoundary_holds` is a Lean theorem proved from the lower packaging lemmas, not an additional assumption.
+The lower packaging theorems in \Cref{thm:raw-boundary-packages} first assemble the transparency results from \Cref{thm:kvm-guest-memory-transparency,thm:kvm-mmio-observer-transparency,thm:kvm-irq-transparency} into the named boundary predicates; this is the Lean-side reduction from wrapper facts to the `LinuxVirtioRawBoundary` interface just listed, and `linuxVirtioRawBoundary_holds (vm) (vcpu) (runArea) (guestMemory)` is unconditional in those arguments.
+Its function is therefore documentary rather than path-specific: it names the wrapper family and trust boundary at which the Linux runtime theorems stop, while the substantive successful-path runtime statements live in the recovered-report and `IOResultRunsTo` conjuncts of the transport and loop theorems above.
+The current runtime and transport theorems then stop at those predicates.
+Nothing below that layer is proved here: because the lower `_defeq_raw` lemmas are just `rfl`, the remaining trust is precisely the correctness of the raw FFI definitions and extern declarations in `Microvmm/FFI.lean` together with the behavior of `ffi/shim.c`, not any additional proof obligation hidden in this section.
 \end{proof}
 
 \chapter{Safety Proofs Still in Progress}

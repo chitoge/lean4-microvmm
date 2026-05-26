@@ -1,6 +1,9 @@
 /.lake/
 /build/
 /lake-manifest.json
+/docbuild/.lake/
+/docbuild/lake-manifest.json
+/docbuild/lean-toolchain
 /artifacts/kernel/build/
 /artifacts/kernel/cache/
 /artifacts/kernel/src/
